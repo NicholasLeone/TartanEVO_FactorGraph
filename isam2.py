@@ -19,8 +19,8 @@ def npy_load(dir, file):
     full_data = np.load(input)
     return full_data    
 
-def read_and_extract_arrays(txt_file):
-    input = os.path.join(txt_file, "TartanEVO.tum")
+def read_and_extract_arrays(txt_file, file):
+    input = os.path.join(txt_file, file+".tum")
     full_data = np.loadtxt(input)
 
     # Extract only the x, y, z columns (column indices 1, 2, and 3)
@@ -79,16 +79,16 @@ if __name__ == "__main__":
     isam = gtsam.ISAM2(parameters)    
 
     # Declare the 3D translational standard deviations of the prior factor's Gaussian model, in meters.
-    prior_xyz_sigma = 1e-1
+    prior_xyz_sigma = 1e-10
 
     # Declare the 3D rotational standard deviation of the prior factor's Gaussian model, in radians.
-    prior_theta_sigma = 5e-1
+    prior_theta_sigma = 1e-10
 
     # Declare the 3D translational standard deviations of the odometry factor's Gaussian model, in meters.
-    odometry_xyz_sigma = 5e-2
+    odometry_xyz_sigma = 1e-3
 
     # Declare the 3D rotational standard deviation of the odometry factor's Gaussian model, in radians.
-    odometry_theta_sigma = 1e-1
+    odometry_theta_sigma = 1e-3
 
     soft_prior_xyz_sigma = 1.25e-1
     soft_prior_theta_sigma = 1.25e-1
@@ -101,27 +101,29 @@ if __name__ == "__main__":
     SOFT_PRIOR_NOISE = noise_model(soft_prior_theta_sigma, soft_prior_xyz_sigma)    
 
     # Set PRIOR_VELOCITY_NOISE
-    PRIOR_VELOCITY_NOISE = gtsam.noiseModel.Isotropic.Sigma(3, 1e-3)
+    PRIOR_VELOCITY_NOISE = gtsam.noiseModel.Isotropic.Sigma(3, 1e-10)
     
     # accelerometer bias random work noise standard deviation.  #0.02
-    acc_w = 0.02    
-    gyr_w = 1e-3
+    acc_w = 1e-1 
+    gyr_w = 1e-1
     
     # Set BIAS_NOISE and PRIOR_BIAS_NOISE
     biasN = np.array([acc_w, acc_w, acc_w, gyr_w, gyr_w, gyr_w])
-    BIAS_NOISE = noise_model(acc_w, gyr_w)
-    PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 1e-3)
+    BIAS_NOISE = noise_model(acc_w, gy   r_w)
+    PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 1e-1)
 
 
     # Get absolute and relative poses, and timestamps from original VO output
-    poses, delta, timestamps = read_and_extract_arrays(input)
+    poses, delta, timestamps = read_and_extract_arrays(input, 'TartanEVO')
+    poses_gt, _, _ = read_and_extract_arrays(input, 'ground_truth')
+    vel = npy_load(input, "vel_global")
     acc = npy_load(input, "acc")
     gyro = npy_load(input, "gyro")    
 
     # Create Preint IMU Parameter object
     pim_params = gtsam.PreintegrationParams.MakeSharedD(9.80511)
-    gyro_sigma = 0.01
-    accel_sigma = 0.02
+    gyro_sigma = 1e-3
+    accel_sigma = 1e-3
     I_3x3 = np.eye(3)
     pim_params.setGyroscopeCovariance(gyro_sigma**2 * I_3x3)
     pim_params.setAccelerometerCovariance(accel_sigma**2 * I_3x3)
@@ -141,11 +143,13 @@ if __name__ == "__main__":
     # Set initial pose
     x0, y0, z0, roll0, pitch0, yaw0 = poses[0, :]
     rot0 = R.from_euler(axis_sequence, [roll0, pitch0, yaw0], degrees=False)
-    prev_pose = gtsam.Pose3(r = gtsam.Rot3(rot0.as_matrix().astype(np.float64)), t = gtsam.Point3(x0, y0, z0))
+    # prev_pose = gtsam.Pose3(r = gtsam.Rot3(rot0.as_matrix().astype(np.float64)), t = gtsam.Point3(x0, y0, z0))
     # prev_pose = gtsam.Pose3(r = gtsam.Rot3(np.eye(3).astype(np.float64)), t = gtsam.Point3(0, 0, 0))
+    prev_pose = gtsam.Pose3(r = gtsam.Rot3(R.from_euler(axis_sequence, poses_gt[0, 3:], degrees=False).as_matrix()), t = gtsam.Point3(poses_gt[0, :3]))
+
 
     # Set initial velocity
-    prev_vel = gtsam.Point3(0.0, 0.0, 0.0)
+    prev_vel = gtsam.Point3(vel[0])
     prev_state = gtsam.NavState(prev_pose, prev_vel)
 
     # Push priors
@@ -163,6 +167,8 @@ if __name__ == "__main__":
 
     # IMU preintegration counter
     imu_count = 0
+
+    odom_noise = ODOMETRY_NOISE
 
 
     for i in range(1, len(poses)):
@@ -183,21 +189,22 @@ if __name__ == "__main__":
                 if imu_count < len(acc):
                     pim.integrateMeasurement(acc[imu_count], gyro[imu_count], 0.01)
                     imu_count += 1
+
         # Every 100 iterations (0.1*100 = 10 seconds), push anchor as prior
-        if i % 100 == 0:
-            graph.push_back(gtsam.PriorFactorPose3(X(i), pose, SOFT_PRIOR_NOISE))
+        # if i % 100 == 0:
+            # graph.push_back(gtsam.PriorFactorPose3(X(i), pose, SOFT_PRIOR_NOISE))
                 # graph.push_back(gtsam.PriorFactorPose3(X(i), prev_pose, SOFT_PRIOR_NOISE))
         
         # Push IMU factor
-        factor = gtsam.ImuFactor(X(i - 1), V(i - 1), X(i), V(i), B(i - 1), pim)
-        graph.push_back(factor)        
+        factor = gtsam.ImuFactor(X(i - 1), V(i - 1), X(i), V(i), B(0), pim)
+        graph.push_back(factor)                
         
         # Push relative pose from VO into graph
-        graph.push_back(gtsam.BetweenFactorPose3(X(i - 1), X(i), delta_pose, ODOMETRY_NOISE))
+        graph.push_back(gtsam.BetweenFactorPose3(X(i - 1), X(i), delta_pose, odom_noise))
 
         # Push bias into graph
         # graph.push_back(gtsam.BetweenFactorConstantBias(B(i - 1), B(i), gtsam.imuBias.ConstantBias(), gtsam.noiseModel.Diagonal.Sigmas(np.sqrt(pim.deltaTij())*biasN)))
-        graph.push_back(gtsam.BetweenFactorConstantBias(B(i - 1), B(i), gtsam.imuBias.ConstantBias(), PRIOR_BIAS_NOISE))  
+        # graph.push_back(gtsam.BetweenFactorConstantBias(B(i - 1), B(i), gtsam.imuBias.ConstantBias(), PRIOR_BIAS_NOISE))  
 
         # Estimate current pose and velocity
         computed_pose_estimate = prev_pose.compose(delta_pose)
@@ -207,7 +214,7 @@ if __name__ == "__main__":
         initial_estimate.insert(V(i), navState.velocity())
         initial_estimate.insert(X(i), navState.pose()) # Predicted pose based on IMU
         # initial_estimate.insert(X(i), computed_pose_estimate) # Predicted pose based on relative pose + previous pose
-        initial_estimate.insert(B(i), prev_bias)        
+        # initial_estimate.insert(B(i), prev_bias)        
 
         # Perform incremental update to iSAM2's internal Bayes tree, optimizing only the affected variables.
         print("Timestep: ", i*0.1)
@@ -218,8 +225,18 @@ if __name__ == "__main__":
         result = isam.calculateEstimate()
         prev_pose = result.atPose3(X(i))
         prev_vel = result.atPoint3(V(i))
-        prev_bias = result.atConstantBias(B(i))
+        # prev_bias = result.atConstantBias(B(i))
         prev_state = gtsam.NavState(prev_pose, prev_vel)
+        
+        # if i > 1:
+        #     key_vector = gtsam.KeyVector()
+        #     key_vector.append(X(i - 1))
+        #     key_vector.append(X(i))
+        #     marginals = gtsam.Marginals(isam.getFactorsUnsafe(), isam.calculateEstimate())
+        #     joint_cov = marginals.jointMarginalCovariance(key_vector)
+        #     full_cov = joint_cov.fullMatrix()
+        #     rel_cov = full_cov[6:, 6:]
+        #     odom_noise = gtsam.noiseModel.Gaussian.Covariance(rel_cov)
         
         # Reset graph, values, and IMU integration object
         graph.resize(0)       
@@ -242,3 +259,4 @@ if __name__ == "__main__":
     
     # Save final trajectory
     write_traj(input, final_traj, timestamps, "CountryHouse-P000-gtsam_isam2.tum")
+
